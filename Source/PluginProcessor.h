@@ -21,7 +21,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool hasEditor() const override { return true; }
 
-    const juce::String getName() const override { return "Riser Maker"; }
+    const juce::String getName() const override { return "Moon Riser"; }
     bool acceptsMidi() const override { return false; }
     bool producesMidi() const override { return false; }
     double getTailLengthSeconds() const override { return 0.0; }
@@ -40,6 +40,10 @@ public:
     static juce::AudioProcessorValueTreeState::ParameterLayout createLayout();
     float getP (const char* id) const { return apvts.getRawParameterValue (id)->load(); }
     void setParamPlain (const juce::String& id, float plainValue);
+
+    // tempo-synced tremolo divisions
+    static juce::StringArray getTremDivisionNames();
+    static double getTremDivision (int index);   // note value as 1/x of a whole note (8 = eighth)
 
     // --- presets ---
     static int getNumFactoryPresets();

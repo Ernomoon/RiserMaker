@@ -22,9 +22,9 @@ const std::vector<FactoryPreset>& factoryPresets()
         { "Default", {} },
         { "Vocal Wash",    { { "chorus", 1.f }, { "chorusMix", 0.5f }, { "highCut", 12000.f } } },
         { "Dark Riser",    { { "lowCut", 120.f }, { "highCut", 3500.f }, { "drive", 1.f }, { "driveAmt", 0.5f }, { "driveMix", 0.4f } } },
-        { "Telephone Build", { { "phone", 1.f }, { "tremolo", 1.f }, { "tremRate", 8.f }, { "tremMix", 0.7f } } },
+        { "Telephone Build", { { "phone", 1.f }, { "tremolo", 1.f }, { "tremRate", 3.f }, { "tremMix", 0.7f } } },
         { "Wide Shimmer",  { { "chorus", 1.f }, { "chorusMix", 0.8f }, { "chorusRate", 1.2f }, { "lowCut", 200.f }, { "highCut", 14000.f } } },
-        { "Hard Drive",    { { "drive", 1.f }, { "driveAmt", 0.85f }, { "driveMix", 0.7f }, { "tremolo", 1.f }, { "tremRate", 12.f }, { "tremMix", 0.6f } } },
+        { "Hard Drive",    { { "drive", 1.f }, { "driveAmt", 0.85f }, { "driveMix", 0.7f }, { "tremolo", 1.f }, { "tremRate", 5.f }, { "tremMix", 0.6f } } },
         { "Short Snap (1/2 bar)", { { "length", 1.f }, { "chorus", 1.f }, { "chorusMix", 0.4f } } },
         { "Long Epic (8 bars)",   { { "length", 5.f }, { "lowCut", 150.f }, { "highCut", 9000.f } } },
     };
@@ -41,7 +41,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiserProcessor::createLayout
                                                    StringArray { "1/4 Bar", "1/2 Bar", "1 Bar", "2 Bars", "4 Bars", "8 Bars" }, 4));
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "vox", 1 }, "Vox Mode", true));
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "loop", 1 }, "Loop", false));
-    l.add (std::make_unique<AudioParameterBool> (ParameterID { "autoRec", 1 }, "Auto Capture", true));
+    l.add (std::make_unique<AudioParameterBool> (ParameterID { "autoRec", 1 }, "Auto Rec", false));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "cutSlope", 1 }, "Cut Slope",
                                                    StringArray { "12 dB/oct", "24 dB/oct", "48 dB/oct" }, 2));
 
@@ -61,9 +61,20 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiserProcessor::createLayout
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "chorusRate", 1 }, "Chorus Rate", NormalisableRange<float> (0.1f, 6.0f, 0.0f, 0.5f), 1.0f));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "driveAmt", 1 }, "Drive Amount", NormalisableRange<float> (0.0f, 1.0f), 0.7f));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "driveMix", 1 }, "Drive Mix", NormalisableRange<float> (0.0f, 1.0f), 0.5f));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "tremRate", 1 }, "Tremolo Rate", NormalisableRange<float> (0.5f, 20.0f, 0.0f, 0.5f), 5.0f));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "tremRate", 1 }, "Tremolo Rate", getTremDivisionNames(), 3));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "tremMix", 1 }, "Tremolo Mix", NormalisableRange<float> (0.0f, 1.0f), 1.0f));
     return l;
+}
+
+juce::StringArray RiserProcessor::getTremDivisionNames()
+{
+    return juce::StringArray { "1/2", "1/4", "1/4T", "1/8", "1/8T", "1/16", "1/16T", "1/32" };
+}
+
+double RiserProcessor::getTremDivision (int index)
+{
+    static const double d[8] = { 2.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0 };
+    return d[juce::jlimit (0, 7, index)];
 }
 
 RiserProcessor::RiserProcessor()
@@ -274,7 +285,8 @@ riser::FxParams RiserProcessor::readFx() const
     p.chorusDepth = getP ("chorusDepth");
     p.driveAmt = getP ("driveAmt");
     p.driveMix = getP ("driveMix");
-    p.tremRate = getP ("tremRate");
+    // tempo-synced: cycles per second = bpm * division / 240   (1/8 note at 120 bpm = 4 Hz)
+    p.tremRate = (float) (hostBpm.load() * getTremDivision ((int) std::lround (getP ("tremRate"))) / 240.0);
     p.tremMix = getP ("tremMix");
     p.lowCut = getP ("lowCut");
     p.highCut = getP ("highCut");
@@ -417,7 +429,7 @@ void RiserProcessor::loadSourceFromFile (const juce::File& f)
 juce::File RiserProcessor::getRiserFolder() const
 {
     return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
-        .getChildFile ("RiserMaker").getChildFile ("Risers");
+        .getChildFile ("MoonRiser").getChildFile ("Risers");
 }
 
 int RiserProcessor::countRiserFiles (juce::int64& bytes) const
@@ -445,7 +457,9 @@ int RiserProcessor::deleteAllRisers()
                     ++deleted;
     };
     wipe (getRiserFolder());
-    wipe (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("RiserMaker")); // old location
+    // folders used by earlier versions
+    wipe (juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("RiserMaker").getChildFile ("Risers"));
+    wipe (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("RiserMaker"));
     exportedRevision = -1;
     exportedFile = juce::File();
     return deleted;
@@ -510,7 +524,15 @@ void RiserProcessor::applyFactoryPreset (int index)
     if (index < 0 || index >= getNumFactoryPresets())
         return;
     for (auto* p : getParameters())
+    {
+        if (auto* rp = dynamic_cast<juce::RangedAudioParameter*> (p))
+        {
+            const auto id = rp->paramID;
+            if (id == "loop" || id == "autoRec")
+                continue; // recording / playback settings are not part of a sound preset
+        }
         p->setValueNotifyingHost (p->getDefaultValue());
+    }
     for (auto& kv : factoryPresets()[(size_t) index].values)
         setParamPlain (kv.first, kv.second);
 }
@@ -518,7 +540,7 @@ void RiserProcessor::applyFactoryPreset (int index)
 juce::File RiserProcessor::getUserPresetDir() const
 {
     return juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory)
-        .getChildFile ("RiserMaker").getChildFile ("Presets");
+        .getChildFile ("MoonRiser").getChildFile ("Presets");
 }
 
 juce::StringArray RiserProcessor::listUserPresets() const
@@ -551,17 +573,22 @@ bool RiserProcessor::loadUserPreset (const juce::String& name)
     auto xml = juce::XmlDocument::parse (f);
     if (xml == nullptr || ! xml->hasTagName (apvts.state.getType()))
         return false;
+    const float keepLoop = getP ("loop"), keepAuto = getP ("autoRec");
     apvts.replaceState (juce::ValueTree::fromXml (*xml));
+    setParamPlain ("loop", keepLoop);
+    setParamPlain ("autoRec", keepAuto);
     return true;
 }
 
 void RiserProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
-    apvts.state.setProperty ("uiW", editorWidth, nullptr);
     auto state = apvts.copyState();
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
     if (xml != nullptr)
+    {
+        xml->setAttribute ("uiW", editorWidth);
         copyXmlToBinary (*xml, destData);
+    }
 }
 
 void RiserProcessor::setStateInformation (const void* data, int sizeInBytes)
@@ -569,8 +596,8 @@ void RiserProcessor::setStateInformation (const void* data, int sizeInBytes)
     std::unique_ptr<juce::XmlElement> xml (getXmlFromBinary (data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
     {
+        editorWidth = juce::jlimit (480, 1120, xml->getIntAttribute ("uiW", 640));
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
-        editorWidth = juce::jlimit (480, 1120, (int) apvts.state.getProperty ("uiW", 640));
     }
 }
 
