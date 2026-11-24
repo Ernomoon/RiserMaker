@@ -3,9 +3,9 @@
 
 namespace
 {
-const char* const kRenderIds[17] = { "length", "vox", "lowCut", "highCut", "phone", "chorus", "drive", "tremolo",
+const char* const kRenderIds[18] = { "length", "vox", "lowCut", "highCut", "phone", "chorus", "drive", "tremolo",
                                      "phoneMix", "chorusMix", "chorusRate", "driveAmt", "driveMix", "tremRate", "tremMix",
-                                     "chorusDepth", "cutSlope" };
+                                     "chorusDepth", "cutSlope", "eqOn" };
 const int kCutOrders[3] = { 2, 4, 8 };
 const double kLenMult[6] = { 0.25, 0.5, 1.0, 2.0, 4.0, 8.0 };
 const char* const kLenName[6] = { "quarter", "half", "1", "2", "4", "8" };
@@ -42,6 +42,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiserProcessor::createLayout
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "vox", 1 }, "Vox Mode", true));
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "loop", 1 }, "Loop", false));
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "autoRec", 1 }, "Auto Rec", false));
+    l.add (std::make_unique<AudioParameterBool> (ParameterID { "eqOn", 1 }, "EQ On", true));
     l.add (std::make_unique<AudioParameterChoice> (ParameterID { "cutSlope", 1 }, "Cut Slope",
                                                    StringArray { "12 dB/oct", "24 dB/oct", "48 dB/oct" }, 2));
 
@@ -290,6 +291,11 @@ riser::FxParams RiserProcessor::readFx() const
     p.tremMix = getP ("tremMix");
     p.lowCut = getP ("lowCut");
     p.highCut = getP ("highCut");
+    if (getP ("eqOn") < 0.5f) // EQ bypassed: the settings stay, the audio is not filtered
+    {
+        p.lowCut = 20.0f;
+        p.highCut = 20000.0f;
+    }
     p.cutOrder = kCutOrders[juce::jlimit (0, 2, (int) std::lround (getP ("cutSlope")))];
     return p;
 }
@@ -308,6 +314,8 @@ void RiserProcessor::timerCallback()
             sourceSR = hostSR.load();
             riser::trimLeading (source, sourceSR);
             ++sourceVersion;
+            ++captureId;
+            manualSel = false;
             analyseSource();
             renderDirty = true;
         }
@@ -360,10 +368,18 @@ void RiserProcessor::rebuild()
     if (base.getNumSamples() == 0 || std::abs (baseLen - lengthSec) > 1.0e-6 || baseVox != vox
         || baseSrcVersion != sourceVersion || std::abs (baseSR - sr) > 0.5)
     {
-        excerpt = riser::chooseExcerpt (source, sr, lengthSec, vox);
+        const int srcN = source.getNumSamples();
+        if (manualSel && srcN > 0)
+        {
+            excerpt.start = juce::jlimit (0, srcN - 1, (int) (manA * (float) srcN));
+            excerpt.length = juce::jmax (64, juce::jmin (srcN - excerpt.start, (int) ((manB - manA) * (float) srcN)));
+        }
+        else
+            excerpt = riser::chooseExcerpt (source, sr, lengthSec, vox);
         const float srcLen = (float) juce::jmax (1, source.getNumSamples());
         selStart = (float) excerpt.start / srcLen;
-        selEnd = (float) (excerpt.start + excerpt.length) / srcLen;
+        const int usedLen = juce::jmin (excerpt.length, (int) (lengthSec * sr));
+        selEnd = (float) (excerpt.start + usedLen) / srcLen;
         base = riser::buildBase (source, sr, lengthSec, vox, excerpt);
         baseLen = lengthSec;
         baseVox = vox;
@@ -402,6 +418,35 @@ void RiserProcessor::clearSource()
     riserPeaks.clear();
     sibilance.clear();
     selStart = selEnd = 0.0f;
+    manualSel = false;
+    ++uiVersion;
+}
+
+void RiserProcessor::setManualSelection (float a, float b)
+{
+    if (source.getNumSamples() == 0)
+        return;
+    a = juce::jlimit (0.0f, 1.0f, a);
+    b = juce::jlimit (0.0f, 1.0f, b);
+    if (a > b) std::swap (a, b);
+    const float minLen = (float) (0.1 * sourceSR / (double) source.getNumSamples()); // at least 100 ms
+    if (b - a < minLen)
+        b = juce::jmin (1.0f, a + minLen);
+    manA = a;
+    manB = b;
+    manualSel = true;
+    ++sourceVersion;
+    renderDirty = true;
+    ++uiVersion;
+}
+
+void RiserProcessor::clearManualSelection()
+{
+    if (! manualSel)
+        return;
+    manualSel = false;
+    ++sourceVersion;
+    renderDirty = true;
     ++uiVersion;
 }
 
@@ -422,6 +467,8 @@ void RiserProcessor::loadSourceFromFile (const juce::File& f)
     source = riser::resampleBuffer (tmp, r->sampleRate, hostSR.load());
     sourceSR = hostSR.load();
     ++sourceVersion;
+    ++captureId;
+    manualSel = false;
     analyseSource();
     renderDirty = true;
 }

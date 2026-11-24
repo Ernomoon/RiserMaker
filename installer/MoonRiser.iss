@@ -1,7 +1,7 @@
 ; Inno Setup script - builds MoonRiser-Setup.exe  (made by Ernomoon)
 
 #define AppName "Moon Riser"
-#define AppVer  "0.2.0"
+#define AppVer  "0.3.0"
 
 [Setup]
 AppId={{B6B0B8D0-7C1E-4A53-9C0B-5A5D6E0A1F11}

@@ -101,7 +101,7 @@ Excerpt chooseExcerpt (const juce::AudioBuffer<float>& src, double sr, double le
 
     const int hop = juce::jmax (32, (int) (sr * 0.005));
     const int F = n / hop;
-    const int cap = (int) (juce::jlimit (0.4, vox ? 4.0 : 6.0, lengthSec * (vox ? 0.6 : 0.9)) * sr);
+    const int cap = (int) (juce::jlimit (0.4, vox ? 4.0 : 8.0, lengthSec * (vox ? 0.6 : 1.0)) * sr);
     ex.start = 0;
     ex.length = juce::jmin (n, cap);
     if (F < 8)
@@ -183,6 +183,59 @@ Excerpt chooseExcerpt (const juce::AudioBuffer<float>& src, double sr, double le
     return ex;
 }
 
+// INST mode: fill the whole riser length by repeating the chosen element with equal-power crossfades.
+static void tileFill (juce::AudioBuffer<float>& w, int exLen, int n, double sr)
+{
+    const int xf = juce::jmax (1, juce::jmin (exLen / 3, (int) (0.03 * sr)));
+    juce::AudioBuffer<float> seg (2, exLen);
+    for (int ch = 0; ch < 2; ++ch)
+        seg.copyFrom (ch, 0, w, ch, 0, exLen);
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        float* d = seg.getWritePointer (ch);
+        for (int i = 0; i < xf; ++i)
+        {
+            const float t = ((float) i + 0.5f) / (float) xf;
+            const float g = std::sin (t * 1.5707963f);
+            d[i] *= g;
+            d[exLen - 1 - i] *= g;
+        }
+    }
+    w.clear();
+    const int hopStep = juce::jmax (1, exLen - xf);
+    for (int pos = 0; pos < n; pos += hopStep)
+    {
+        const int cnt = juce::jmin (exLen, n - pos);
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float* dst = w.getWritePointer (ch) + pos;
+            const float* src = seg.getReadPointer (ch);
+            for (int i = 0; i < cnt; ++i)
+                dst[i] += src[i];
+        }
+    }
+}
+
+// INST mode: a low-pass that opens up over the riser (tension build, like a filter sweep).
+static void applySweep (juce::AudioBuffer<float>& b, double sr, int n)
+{
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        float* d = b.getWritePointer (ch);
+        Biquad lp;
+        for (int i = 0; i < n; ++i)
+        {
+            if ((i & 31) == 0)
+            {
+                const double t = (double) i / (double) n;
+                const double fc = 500.0 * std::pow (16000.0 / 500.0, std::pow (t, 0.75));
+                lp.c = BiquadCoefs::make (false, sr, fc, 0.8);
+            }
+            d[i] = lp.process (d[i]);
+        }
+    }
+}
+
 juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, double sr, double lengthSec, bool vox, const Excerpt& ex)
 {
     juce::AudioBuffer<float> work;
@@ -200,17 +253,48 @@ juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, doub
     for (int ch = 0; ch < 2; ++ch)
         work.copyFrom (ch, 0, source, juce::jmin (ch, source.getNumChannels() - 1), exStart, exLen);
 
-    const int fin = juce::jmin (exLen / 2, (int) (0.003 * sr));
-    const int fout = juce::jmin (exLen / 2, (int) (0.03 * sr));
-    for (int ch = 0; ch < 2; ++ch)
+    if (! vox && exLen >= 128 && exLen < n)
     {
-        float* d = work.getWritePointer (ch);
-        for (int i = 0; i < fin; ++i)  d[i] *= (float) i / (float) fin;
-        for (int i = 0; i < fout; ++i) d[exLen - 1 - i] *= (float) i / (float) fout;
+        tileFill (work, exLen, n, sr);   // INST: the groove / harmony fills the whole riser
+    }
+    else
+    {
+        const int fin = juce::jmin (exLen / 2, (int) (0.003 * sr));
+        const int fout = juce::jmin (exLen / 2, (int) ((vox ? 0.03 : 0.01) * sr));
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float* d = work.getWritePointer (ch);
+            for (int i = 0; i < fin; ++i)  d[i] *= (float) i / (float) fin;
+            for (int i = 0; i < fout; ++i) d[exLen - 1 - i] *= (float) i / (float) fout;
+        }
     }
 
     if (vox)
         deEss (work, sr, exLen);
+
+    // INST: keep the bass out of the reverb. It is reversed on its own, clean and tight.
+    juce::AudioBuffer<float> lowPath;
+    double instLowE = 0.0, instHighE = 0.0;
+    if (! vox)
+    {
+        lowPath.setSize (2, n);
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float* w = work.getWritePointer (ch);
+            float* lo = lowPath.getWritePointer (ch);
+            CutFilter lp;
+            lp.setup (false, sr, 150.0, 4);
+            for (int i = 0; i < n; ++i)
+            {
+                const float x = w[i];
+                const float y = lp.process (x);
+                lo[i] = y;
+                w[i] = x - y;
+                instLowE += (double) y * y;
+                instHighE += (double) w[i] * w[i];
+            }
+        }
+    }
 
     // remember how much bass the dry element has (reverb can thin it out)
     auto bandEnergy = [&] (const juce::AudioBuffer<float>& b, int len, bool lowOnly)
@@ -269,7 +353,8 @@ juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, doub
         std::memset (r + (n - lead), 0, sizeof (float) * (size_t) lead);
     }
 
-    // bring the low end back to what the original element had
+    // VOX: bring the low end back to what the original element had
+    if (vox)
     {
         const double wetLow = bandEnergy (work, n, true), wetTot = bandEnergy (work, n, false);
         const double rDry = dryLow / (dryTot + 1.0e-20), rWet = wetLow / (wetTot + 1.0e-20);
@@ -344,6 +429,34 @@ juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, doub
     // the magic step: reverse
     work.reverse (0, 0, n);
     work.reverse (1, 0, n);
+
+    if (! vox)
+    {
+        // clean reversed bass that swells up, mixed back at the ORIGINAL bass-to-rest balance
+        lowPath.reverse (0, 0, n);
+        lowPath.reverse (1, 0, n);
+        const int tail = juce::jmax (1, n / 8);
+        double eh = 0.0, el = 0.0;
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = n - tail; i < n; ++i)
+            {
+                const double env = std::exp (-5.0 * (1.0 - (double) i / (double) n));
+                const double a = work.getReadPointer (ch)[i], b = lowPath.getReadPointer (ch)[i] * env;
+                eh += a * a;
+                el += b * b;
+            }
+        const double want = std::sqrt ((instLowE + 1.0e-20) / (instHighE + 1.0e-20)); // original low/high amplitude ratio
+        const double have = std::sqrt ((el + 1.0e-20) / (eh + 1.0e-20));
+        const float lowGain = (float) juce::jlimit (0.05, 8.0, want / have);
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            float* w = work.getWritePointer (ch);
+            const float* lo = lowPath.getReadPointer (ch);
+            for (int i = 0; i < n; ++i)
+                w[i] += lo[i] * (float) std::exp (-5.0 * (1.0 - (double) i / (double) n)) * lowGain;
+        }
+        applySweep (work, sr, n);
+    }
 
     // fades + normalise to -6 dBFS
     const int fi = juce::jmin (n / 4, (int) (0.02 * sr));

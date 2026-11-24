@@ -68,6 +68,11 @@ public:
     int getRecState() const { return recState.load(); }   // 0 idle, 1 auto, 2 manual
     float getRecSeconds() const { return (float) recSamples.load() / (float) hostSR.load(); }
     float selStart = 0.0f, selEnd = 0.0f;                 // chosen element, normalised over the source
+    bool hasManualSelection() const { return manualSel; }
+    void setManualSelection (float a, float b);           // user drags a region in RAW view (0..1 over the source)
+    void clearManualSelection();                          // back to the automatic pick
+    double getSourceSeconds() const { return sourceSR > 0.0 ? (double) source.getNumSamples() / sourceSR : 0.0; }
+    int getCaptureId() const { return captureId; }        // changes when new audio was captured / loaded
     int editorWidth = 640;
 
     // exported risers
@@ -89,7 +94,7 @@ private:
     void analyseSource();
     riser::FxParams readFx() const;
 
-    static constexpr int kNumRenderIds = 17;
+    static constexpr int kNumRenderIds = 18;
     std::array<float, kNumRenderIds> lastVals;
 
     // audio thread
@@ -115,7 +120,9 @@ private:
     // message thread
     juce::AudioBuffer<float> source, base;
     double sourceSR = 44100.0;
-    int sourceVersion = 0;
+    int sourceVersion = 0, captureId = 0;
+    bool manualSel = false;
+    float manA = 0.0f, manB = 1.0f;
     double baseLen = -1.0, baseSR = -1.0;
     bool baseVox = true;
     int baseSrcVersion = -1;

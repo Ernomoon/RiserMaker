@@ -12,6 +12,7 @@ RiserContent::RiserContent (RiserProcessor& p, juce::Component& pp, std::functio
 {
     setSize (640, 740);
 
+    addAndMakeVisible (backdrop);
     addAndMakeVisible (presetBox);
     addAndMakeVisible (prevBtn);
     addAndMakeVisible (nextBtn);
@@ -49,8 +50,27 @@ RiserContent::RiserContent (RiserProcessor& p, juce::Component& pp, std::functio
     recBtn.onClick = [this] { proc.setManualRec (! proc.isManualRec()); };
     autoBtn.onClick = [this] { setBoolParam ("autoRec", proc.getP ("autoRec") < 0.5f); };
     exportBtn.onClick = [this] { exportWav(); };
-    rawBtn.onClick = [this] { wave.showRaw = true; wave.repaint(); };
-    editBtn.onClick = [this] { wave.showRaw = false; wave.repaint(); };
+    rawBtn.onClick = [this] { wave.setShowRaw (true); };
+    editBtn.onClick = [this] { wave.setShowRaw (false); };
+
+    // tooltips (appear after hovering for a moment)
+    voxBtn.setTooltip ("Vocal mode: skips breaths and a leading 'sss', reduces sibilance, builds the riser from the first word / phrase.");
+    instBtn.setTooltip ("Instrumental mode: uses the whole groove / harmony, keeps the bass clean and opens a filter sweep.");
+    resetBtn.setTooltip ("Clear the recorded audio and the riser.");
+    listenBtn.setTooltip ("Play the riser.");
+    loopBtn.setTooltip ("Loop the riser while listening.");
+    recBtn.setTooltip ("Press, play your audio in the project, press STOP. The riser is made from what was recorded.");
+    autoBtn.setTooltip ("When on, the plugin records the start of a phrase by itself while the project plays.");
+    exportBtn.setTooltip ("Save the riser as a WAV file.");
+    rawBtn.setTooltip ("Show the original recorded audio and the part chosen for the riser.");
+    editBtn.setTooltip ("Show the riser. Drag it into the playlist.");
+    knob.setTooltip ("Riser length in bars (follows the project tempo).");
+    saveBtn.setTooltip ("Save the current settings as your own preset.");
+    menuBtn.setTooltip ("Menu: open the risers folder, delete all risers, about.");
+    phoneBtn.setTooltip ("Telephone filter. Icon = on/off, name = settings.");
+    chorusBtn.setTooltip ("Wide chorus. Icon = on/off, name = settings.");
+    driveBtn.setTooltip ("Saturation. Icon = on/off, name = settings.");
+    tremBtn.setTooltip ("Tempo-synced tremolo. Icon = on/off, name = settings.");
 
     addAndMakeVisible (wave);
     addAndMakeVisible (eq);
@@ -185,7 +205,7 @@ void RiserContent::showMenu()
                          else if (r == 4)
                              juce::AlertWindow::showAsync (juce::MessageBoxOptions::makeOptionsOk (
                                                                juce::MessageBoxIconType::InfoIcon, "Moon Riser",
-                                                               "Moon Riser  v0.2\nReverse-reverb riser maker\n\nCreated by Ernomoon",
+                                                               "Moon Riser  v0.3\nReverse-reverb riser maker\n\nCreated by Ernomoon",
                                                                "OK", safe.getComponent()),
                                                            [] (int) {});
                      });
@@ -251,8 +271,21 @@ void RiserContent::timerCallback()
     if (v != lastVer)
     {
         lastVer = v;
-        wave.repaint();
+        wave.refreshBars();
     }
+    const int cid = proc.getCaptureId();
+    if (cid != lastCaptureId)
+    {
+        lastCaptureId = cid;
+        wave.startReveal(); // new audio: the waveform is "drawn in" from the left
+    }
+    const int rs = proc.getRecState();
+    if (rs != lastRecState)
+    {
+        lastRecState = rs;
+        wave.refreshBars();
+    }
+
     const bool vox = proc.getP ("vox") > 0.5f;
     const bool manual = proc.isManualRec();
     voxBtn.setToggleState (vox, juce::dontSendNotification);
@@ -263,8 +296,8 @@ void RiserContent::timerCallback()
     recBtn.setRecording (manual);
     if (manual)
         recBtn.repaint(); // pulsing glow
-    rawBtn.setToggleState (wave.showRaw, juce::dontSendNotification);
-    editBtn.setToggleState (! wave.showRaw, juce::dontSendNotification);
+    rawBtn.setToggleState (wave.isRaw(), juce::dontSendNotification);
+    editBtn.setToggleState (! wave.isRaw(), juce::dontSendNotification);
 
     static const char* names[6] = { "1/4 BAR", "1/2 BAR", "1 BAR", "2 BARS", "4 BARS", "8 BARS" };
     juce::String t = names[juce::jlimit (0, 5, (int) std::lround (proc.getP ("length")))];
@@ -275,76 +308,27 @@ void RiserContent::timerCallback()
         lengthText = t;
         repaint (0, 640, getWidth(), 40);
     }
+
+    // everything below repaints only when something actually changed
+    eq.refresh();
     for (auto* f : { &phoneBtn, &chorusBtn, &driveBtn, &tremBtn })
-        f->repaint();
-    if (proc.isListening() || proc.getRecState() != 0)
+        f->refresh();
+    if (proc.isListening() || rs != 0)
         wave.repaint();
 }
 
 void RiserContent::paint (juce::Graphics& g)
 {
-    // background with a soft moonlit glow
-    g.setGradientFill (juce::ColourGradient (juce::Colour (0xff0e0e13), 0.0f, 0.0f, ui::bg, 0.0f, (float) getHeight(), false));
-    g.fillAll();
-    g.setGradientFill (juce::ColourGradient (ui::purple.withAlpha (0.10f), 320.0f, 60.0f, ui::purple.withAlpha (0.0f), 320.0f, 420.0f, true));
-    g.fillRect (getLocalBounds());
-
-    ui::drawMoon (g, juce::Rectangle<float> (28.0f, 20.0f, 28.0f, 28.0f), juce::Colour (0xffd9ceff), juce::Colour (0xff0d0d11));
-
-    // main panel
-    juce::DropShadow (juce::Colours::black.withAlpha (0.65f), 26, { 0, 8 }).drawForRectangle (g, juce::Rectangle<int> (14, 74, 612, 652));
-    g.setGradientFill (juce::ColourGradient (juce::Colour (0xff1c1c21), 0.0f, 74.0f, juce::Colour (0xff131316), 0.0f, 726.0f, false));
-    g.fillRoundedRectangle (14.0f, 74.0f, 612.0f, 652.0f, 20.0f);
-    g.setColour (juce::Colour (0xff2c2c32));
-    g.drawRoundedRectangle (14.5f, 74.5f, 611.0f, 651.0f, 20.0f, 1.0f);
-    g.setColour (juce::Colours::white.withAlpha (0.05f));
-    g.drawLine (34.0f, 75.5f, 606.0f, 75.5f, 1.0f);
-
-    // waveform panel
-    g.setGradientFill (juce::ColourGradient (juce::Colour (0xff101014), 0.0f, 84.0f, juce::Colour (0xff09090c), 0.0f, 276.0f, false));
-    g.fillRoundedRectangle (26.0f, 84.0f, 588.0f, 192.0f, 14.0f);
-    g.setColour (juce::Colour (0xff202026));
-    g.drawRoundedRectangle (26.5f, 84.5f, 587.0f, 191.0f, 14.0f, 1.0f);
-
-    // title
-    ui::drawMoon (g, juce::Rectangle<float> (42.0f, 97.0f, 14.0f, 14.0f), juce::Colour (0xffb9a8ff), juce::Colour (0xff0f0f13));
-    juce::AttributedString title;
-    title.append ("MOON", ui::font (15.0f).withExtraKerningFactor (0.30f), ui::dim);
-    title.append (" RISER", ui::font (15.0f, true).withExtraKerningFactor (0.30f), ui::light);
-    title.draw (g, juce::Rectangle<float> (66.0f, 92.0f, 200.0f, 24.0f));
-
-    // soft light behind the knob
-    g.setGradientFill (juce::ColourGradient (ui::purple.withAlpha (0.10f), 320.0f, 526.0f, ui::purple.withAlpha (0.0f), 320.0f, 690.0f, true));
-    g.fillRect (juce::Rectangle<int> (20, 400, 600, 300));
-
     juce::AttributedString lab;
     lab.append ("REVERSE  ", ui::font (17.0f, true).withExtraKerningFactor (0.15f), ui::light);
     lab.append (lengthText, ui::font (17.0f).withExtraKerningFactor (0.15f), ui::dim);
     lab.setJustification (juce::Justification::centred);
     lab.draw (g, juce::Rectangle<float> (0.0f, 646.0f, 640.0f, 26.0f));
-
-    // corner screws
-    for (int i = 0; i < 3; ++i)
-        for (int j = 0; j < 3 - i; ++j)
-        {
-            const float dx = 26.0f + (float) i * 11.0f, dy = 690.0f + (float) j * 11.0f;
-            for (float sx : { dx, 640.0f - dx - 6.0f })
-            {
-                g.setColour (juce::Colour (0xff111113));
-                g.fillEllipse (sx, dy, 6.0f, 6.0f);
-                g.setColour (juce::Colour (0xff2e2e33));
-                g.drawEllipse (sx, dy, 6.0f, 6.0f, 1.0f);
-            }
-        }
-
-    // brand footer
-    g.setFont (ui::font (10.5f, true).withExtraKerningFactor (0.22f));
-    g.setColour (ui::dim.withAlpha (0.8f));
-    g.drawText ("MOON RISER   -   by Ernomoon", juce::Rectangle<float> (0.0f, 712.0f, 640.0f, 14.0f), juce::Justification::centred, false);
 }
 
 void RiserContent::resized()
 {
+    backdrop.setBounds (getLocalBounds());
     presetBox.setBounds (150, 20, 230, 36);
     prevBtn.setBounds (384, 20, 34, 36);
     nextBtn.setBounds (420, 20, 34, 36);
@@ -366,12 +350,12 @@ void RiserContent::resized()
     editBtn.setBounds (560, ry, 50, 26);
 
     eq.setBounds (26, 286, 588, 118);
-    knob.setBounds (200, 408, 240, 236);
+    knob.setBounds (170, 404, 300, 240);
 
     for (int i = 0; i < 4; ++i)
     {
         FxButton* b = (i == 0) ? &phoneBtn : (i == 1) ? &chorusBtn : (i == 2) ? &driveBtn : &tremBtn;
-        b->setBounds (66 + 128 * i, 678, 124, 30);
+        b->setBounds (59 + 128 * i, 671, 138, 44);
     }
 }
 
