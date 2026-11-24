@@ -1,4 +1,6 @@
 #include "RiserEngine.h"
+#include <algorithm>
+#include <cstring>
 
 namespace riser
 {
@@ -61,7 +63,127 @@ static void deEss (juce::AudioBuffer<float>& b, double sr, int len)
     }
 }
 
-juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, double sr, double lengthSec, bool vox)
+void trimLeading (juce::AudioBuffer<float>& buf, double sr)
+{
+    const int n = buf.getNumSamples();
+    const int nc = buf.getNumChannels();
+    if (n < 64 || nc < 1)
+        return;
+    float pk = 0.0f;
+    for (int ch = 0; ch < nc; ++ch)
+    {
+        const float* d = buf.getReadPointer (ch);
+        for (int i = 0; i < n; ++i)
+            pk = juce::jmax (pk, std::abs (d[i]));
+    }
+    const float thr = juce::jmax (0.003f, 0.04f * pk);
+    int first = 0;
+    bool found = false;
+    for (int i = 0; i < n && ! found; ++i)
+        for (int ch = 0; ch < nc; ++ch)
+            if (std::abs (buf.getReadPointer (ch)[i]) > thr) { first = i; found = true; break; }
+    first = juce::jmax (0, first - (int) (0.010 * sr));
+    if (first <= 0 || n - first < 64)
+        return;
+    const int len = n - first;
+    juce::AudioBuffer<float> t (nc, len);
+    for (int ch = 0; ch < nc; ++ch)
+        t.copyFrom (ch, 0, buf, ch, first, len);
+    buf.makeCopyOf (t);
+}
+
+Excerpt chooseExcerpt (const juce::AudioBuffer<float>& src, double sr, double lengthSec, bool vox)
+{
+    Excerpt ex;
+    const int n = src.getNumSamples();
+    if (n < 64 || src.getNumChannels() < 1)
+        return ex;
+
+    const int hop = juce::jmax (32, (int) (sr * 0.005));
+    const int F = n / hop;
+    const int cap = (int) (juce::jlimit (0.4, vox ? 4.0 : 6.0, lengthSec * (vox ? 0.6 : 0.9)) * sr);
+    ex.start = 0;
+    ex.length = juce::jmin (n, cap);
+    if (F < 8)
+        return ex;
+
+    std::vector<float> env ((size_t) F), hiE ((size_t) F);
+    Biquad hp;
+    hp.c = BiquadCoefs::make (true, sr, 5500.0, 0.7071);
+    const float* a = src.getReadPointer (0);
+    const float* b = src.getReadPointer (juce::jmin (1, src.getNumChannels() - 1));
+    for (int f = 0; f < F; ++f)
+    {
+        double acc = 0.0, accH = 0.0;
+        for (int i = f * hop; i < (f + 1) * hop; ++i)
+        {
+            const float x = 0.5f * (a[i] + b[i]);
+            const float h = hp.process (x);
+            acc += (double) x * x;
+            accH += (double) h * h;
+        }
+        env[(size_t) f] = (float) std::sqrt (acc / hop);
+        hiE[(size_t) f] = (float) std::sqrt (accH / hop);
+    }
+
+    // reference level = 85th percentile of the first 3 seconds
+    const int refFrames = juce::jmax (1, juce::jmin (F, (int) (3.0 * sr / hop)));
+    std::vector<float> sorted (env.begin(), env.begin() + refFrames);
+    std::sort (sorted.begin(), sorted.end());
+    const float ref = sorted[(size_t) juce::jmin (refFrames - 1, (int) ((double) refFrames * 0.85))];
+    if (ref < 1.0e-6f)
+        return ex;
+
+    // phrase start: first frame that is clearly "real" signal (not a breath / noise)
+    int f0 = 0;
+    while (f0 < F - 1 && env[(size_t) f0] < 0.25f * ref)
+        ++f0;
+    int fs = f0;
+
+    if (vox)
+    {
+        int skipped = 0;
+        while (fs < F - 1 && skipped < 40 && hiE[(size_t) fs] > 0.55f * env[(size_t) fs])
+        {
+            ++fs;
+            ++skipped;
+        }
+        if (env[(size_t) fs] < 0.25f * ref)
+            fs = f0;
+    }
+    else
+    {
+        // instrumental: lock on the first strong hit (kick / chord / downbeat)
+        const int win = juce::jmin (F - 1, f0 + (int) (1.5 * sr / hop));
+        auto strength = [&] (int f) { return juce::jmax (0.0f, env[(size_t) f] - env[(size_t) juce::jmax (0, f - 3)]); };
+        float best = 0.0f;
+        for (int f = f0; f <= win; ++f)
+            best = juce::jmax (best, strength (f));
+        if (best > 0.0f)
+            for (int f = f0; f <= win; ++f)
+                if (strength (f) >= 0.6f * best) { fs = f; break; }
+    }
+
+    const int start = juce::jmax (0, fs * hop - (int) (0.010 * sr));
+    int len = juce::jmin (n - start, cap);
+
+    if (vox && len > (int) (0.5 * sr))
+    {
+        // end the element in a natural pause (word boundary) if there is one
+        const int fa = (start + (int) ((double) len * 0.7)) / hop;
+        const int fb = juce::jmin (F - 1, (start + len) / hop);
+        int fmin = fa;
+        for (int f = fa; f <= fb; ++f)
+            if (env[(size_t) f] < env[(size_t) fmin]) fmin = f;
+        if (fmin > fa && env[(size_t) fmin] < 0.2f * ref)
+            len = juce::jmax ((int) (0.3 * sr), fmin * hop - start);
+    }
+    ex.start = start;
+    ex.length = juce::jmax (64, len);
+    return ex;
+}
+
+juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, double sr, double lengthSec, bool vox, const Excerpt& ex)
 {
     juce::AudioBuffer<float> work;
     const int n = (int) std::lround (lengthSec * sr);
@@ -72,10 +194,11 @@ juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, doub
     work.setSize (2, n);
     work.clear();
 
-    // excerpt = the beginning of the captured phrase
-    const int exLen = juce::jmin (n, srcLen, (int) (juce::jlimit (0.4, 4.0, lengthSec * 0.6) * sr));
+    // the chosen element (see chooseExcerpt)
+    const int exStart = juce::jlimit (0, srcLen - 1, ex.start);
+    const int exLen = juce::jmax (1, juce::jmin (n, ex.length > 0 ? ex.length : srcLen, srcLen - exStart));
     for (int ch = 0; ch < 2; ++ch)
-        work.copyFrom (ch, 0, source, juce::jmin (ch, source.getNumChannels() - 1), 0, exLen);
+        work.copyFrom (ch, 0, source, juce::jmin (ch, source.getNumChannels() - 1), exStart, exLen);
 
     const int fin = juce::jmin (exLen / 2, (int) (0.003 * sr));
     const int fout = juce::jmin (exLen / 2, (int) (0.03 * sr));
@@ -88,6 +211,25 @@ juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, doub
 
     if (vox)
         deEss (work, sr, exLen);
+
+    // remember how much bass the dry element has (reverb can thin it out)
+    auto bandEnergy = [&] (const juce::AudioBuffer<float>& b, int len, bool lowOnly)
+    {
+        double e = 0.0;
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const float* d = b.getReadPointer (ch);
+            CutFilter lp;
+            lp.setup (false, sr, 140.0, 4);
+            for (int i = 0; i < len; ++i)
+            {
+                const float y = lowOnly ? lp.process (d[i]) : d[i];
+                e += (double) y * y;
+            }
+        }
+        return e;
+    };
+    const double dryLow = bandEnergy (work, exLen, true), dryTot = bandEnergy (work, exLen, false);
 
     // long reverb, wet only
     juce::Reverb rv;
@@ -125,6 +267,29 @@ juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, doub
         std::memmove (r, r + lead, sizeof (float) * (size_t) (n - lead));
         std::memset (l + (n - lead), 0, sizeof (float) * (size_t) lead);
         std::memset (r + (n - lead), 0, sizeof (float) * (size_t) lead);
+    }
+
+    // bring the low end back to what the original element had
+    {
+        const double wetLow = bandEnergy (work, n, true), wetTot = bandEnergy (work, n, false);
+        const double rDry = dryLow / (dryTot + 1.0e-20), rWet = wetLow / (wetTot + 1.0e-20);
+        double gdb = 10.0 * std::log10 ((rDry + 1.0e-12) / (rWet + 1.0e-12));
+        gdb = juce::jlimit (-3.0, vox ? 6.0 : 9.0, gdb);
+        if (std::abs (gdb) > 0.5)
+        {
+            const float g = (float) std::pow (10.0, gdb / 20.0);
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                float* d = work.getWritePointer (ch);
+                CutFilter lp;
+                lp.setup (false, sr, 140.0, 4);
+                for (int i = 0; i < n; ++i)
+                {
+                    const float x = d[i];
+                    d[i] = x + lp.process (x) * (g - 1.0f);
+                }
+            }
+        }
     }
 
     // force the tail to decay over exactly lengthSec (-43 dB at the end)
@@ -222,39 +387,40 @@ void applyFx (juce::AudioBuffer<float>& b, double sr, const FxParams& p)
         }
     }
 
-    // CHORUS (2 modulated voices per channel)
+    // CHORUS: 3 modulated voices per channel, opposite modulation on L/R (wide + clearly audible)
     if (p.chorus)
     {
-        const int dl = (int) (sr * 0.06) + 8;
+        const int dl = (int) (sr * 0.08) + 8;
+        const double baseMs = 14.0;
+        const double depthMs = 1.5 + 6.5 * (double) p.chorusDepth;
+        const double inc = (double) p.chorusRate / sr;
         for (int ch = 0; ch < nc; ++ch)
         {
             float* d = b.getWritePointer (ch);
             std::vector<float> line ((size_t) dl, 0.0f);
             int w = 0;
-            double ph0 = ch * 0.25, ph1 = ch * 0.25 + 0.5;
-            const double inc = (double) p.chorusRate / sr;
+            double ph[3];
+            for (int v = 0; v < 3; ++v)
+                ph[v] = (ch == 0 ? 0.0 : 0.5) + (double) v / 3.0;
             for (int i = 0; i < n; ++i)
             {
                 const float x = d[i];
                 line[(size_t) w] = x;
                 float acc = 0.0f;
-                for (int v = 0; v < 2; ++v)
+                for (int v = 0; v < 3; ++v)
                 {
-                    const double ph = (v == 0 ? ph0 : ph1);
-                    const double del = (0.014 + 0.0045 * std::sin (2.0 * kPi * ph) + 0.003 * v) * sr;
+                    const double del = (baseMs + 2.5 * v + depthMs * std::sin (2.0 * kPi * ph[v])) * 0.001 * sr;
                     double rp = (double) w - del;
-                    if (rp < 0.0) rp += dl;
+                    while (rp < 0.0) rp += dl;
                     const int i0 = juce::jlimit (0, dl - 1, (int) rp);
                     const int i1 = (i0 + 1) % dl;
                     const float fr = (float) (rp - i0);
                     acc += line[(size_t) i0] * (1.0f - fr) + line[(size_t) i1] * fr;
+                    ph[v] += inc;
+                    if (ph[v] >= 1.0) ph[v] -= 1.0;
                 }
-                const float wet = acc * 0.5f;
-                d[i] = (x + p.chorusMix * wet) / (1.0f + 0.5f * p.chorusMix);
+                d[i] = x * (1.0f - 0.35f * p.chorusMix) + (acc / 3.0f) * 0.9f * p.chorusMix;
                 w = (w + 1) % dl;
-                ph0 += inc; ph1 += inc;
-                if (ph0 > 1.0) ph0 -= 1.0;
-                if (ph1 > 1.0) ph1 -= 1.0;
             }
         }
     }
@@ -302,8 +468,8 @@ void applyFx (juce::AudioBuffer<float>& b, double sr, const FxParams& p)
         {
             float* d = b.getWritePointer (ch);
             CutFilter hp, lp;
-            hp.setup (true, sr, p.lowCut);
-            lp.setup (false, sr, p.highCut);
+            hp.setup (true, sr, p.lowCut, p.cutOrder);
+            lp.setup (false, sr, p.highCut, p.cutOrder);
             for (int i = 0; i < n; ++i)
             {
                 float x = d[i];

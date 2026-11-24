@@ -58,6 +58,19 @@ public:
     std::vector<std::pair<float, float>> sibilance; // normalised 0..1 over the source
     std::atomic<int> uiVersion { 0 };
 
+    // recording
+    void setManualRec (bool on) { manualRec = on; }
+    bool isManualRec() const { return manualRec.load(); }
+    int getRecState() const { return recState.load(); }   // 0 idle, 1 auto, 2 manual
+    float getRecSeconds() const { return (float) recSamples.load() / (float) hostSR.load(); }
+    float selStart = 0.0f, selEnd = 0.0f;                 // chosen element, normalised over the source
+    int editorWidth = 640;
+
+    // exported risers
+    juce::File getRiserFolder() const;
+    int countRiserFiles (juce::int64& bytes) const;
+    int deleteAllRisers();
+
     void requestListen() { listenRequest = true; }
     void stopListen() { listening = false; }
     bool isListening() const { return listening.load(); }
@@ -72,7 +85,7 @@ private:
     void analyseSource();
     riser::FxParams readFx() const;
 
-    static constexpr int kNumRenderIds = 15;
+    static constexpr int kNumRenderIds = 17;
     std::array<float, kNumRenderIds> lastVals;
 
     // audio thread
@@ -87,6 +100,10 @@ private:
     std::atomic<int> handoffIndex { 0 }, handoffLength { 0 };
     std::atomic<bool> handoffReady { false };
 
+    std::atomic<bool> manualRec { false };
+    std::atomic<int> recState { 0 }, recSamples { 0 };
+    bool capManualActive = false, prevManual = false;
+
     std::atomic<bool> listening { false }, listenRequest { false };
     std::atomic<int> listenPos { 0 };
     std::atomic<int> riserLen { 0 };
@@ -99,6 +116,9 @@ private:
     bool baseVox = true;
     int baseSrcVersion = -1;
     double currentLengthSec = 0.0;
+    riser::Excerpt excerpt;
+    int riserRevision = 0, exportedRevision = -1;
+    juce::File exportedFile;
 
     juce::CriticalSection riserLock;
     juce::AudioBuffer<float> riser;

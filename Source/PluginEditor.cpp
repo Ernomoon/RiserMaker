@@ -1,20 +1,22 @@
 #include "PluginEditor.h"
 
-RiserEditor::RiserEditor (RiserProcessor& p)
-    : juce::AudioProcessorEditor (&p), proc (p), wave (p), eq (p.apvts),
+//==============================================================================
+RiserContent::RiserContent (RiserProcessor& p, juce::Component& pp, std::function<void()> resetSize)
+    : proc (p), popupParent (pp), onResetSize (std::move (resetSize)),
+      wave (p), eq (p.apvts),
       knobAtt (p.apvts, "length", knob),
-      phoneBtn (p.apvts.getParameter ("phone"), "PHONE", [this] { openFxPopup (0, phoneBtn); }),
-      chorusBtn (p.apvts.getParameter ("chorus"), "CHORUS", [this] { openFxPopup (1, chorusBtn); }),
-      driveBtn (p.apvts.getParameter ("drive"), "DRIVE", [this] { openFxPopup (2, driveBtn); }),
-      tremBtn (p.apvts.getParameter ("tremolo"), "TREMOLO", [this] { openFxPopup (3, tremBtn); })
+      phoneBtn (p.apvts.getParameter ("phone"), "PHONE", [this] (juce::uint32 t) { openFxPopup (0, phoneBtn, t); }),
+      chorusBtn (p.apvts.getParameter ("chorus"), "CHORUS", [this] (juce::uint32 t) { openFxPopup (1, chorusBtn, t); }),
+      driveBtn (p.apvts.getParameter ("drive"), "DRIVE", [this] (juce::uint32 t) { openFxPopup (2, driveBtn, t); }),
+      tremBtn (p.apvts.getParameter ("tremolo"), "TREMOLO", [this] (juce::uint32 t) { openFxPopup (3, tremBtn, t); })
 {
-    setLookAndFeel (&lnf);
     setSize (640, 740);
 
     addAndMakeVisible (presetBox);
     addAndMakeVisible (prevBtn);
     addAndMakeVisible (nextBtn);
     addAndMakeVisible (saveBtn);
+    addAndMakeVisible (menuBtn);
     presetBox.setJustificationType (juce::Justification::centredLeft);
     presetBox.onChange = [this]
     {
@@ -28,10 +30,11 @@ RiserEditor::RiserEditor (RiserProcessor& p)
     prevBtn.onClick = [this] { stepPreset (-1); };
     nextBtn.onClick = [this] { stepPreset (1); };
     saveBtn.onClick = [this] { savePresetDialog(); };
+    menuBtn.onClick = [this] { showMenu(); };
     refreshPresets();
     presetBox.setSelectedId (1, juce::dontSendNotification);
 
-    for (auto* b : { &voxBtn, &instBtn, &resetBtn, &listenBtn, &loopBtn, &exportBtn, &rawBtn, &editBtn })
+    for (auto* b : { &voxBtn, &instBtn, &resetBtn, &listenBtn, &loopBtn, &recBtn, &autoBtn, &exportBtn, &rawBtn, &editBtn })
         addAndMakeVisible (b);
     voxBtn.onClick = [this] { setBoolParam ("vox", true); };
     instBtn.onClick = [this] { setBoolParam ("vox", false); };
@@ -42,6 +45,8 @@ RiserEditor::RiserEditor (RiserProcessor& p)
         else                    proc.requestListen();
     };
     loopBtn.onClick = [this] { setBoolParam ("loop", proc.getP ("loop") < 0.5f); };
+    recBtn.onClick = [this] { proc.setManualRec (! proc.isManualRec()); };
+    autoBtn.onClick = [this] { setBoolParam ("autoRec", proc.getP ("autoRec") < 0.5f); };
     exportBtn.onClick = [this] { exportWav(); };
     rawBtn.onClick = [this] { wave.showRaw = true; wave.repaint(); };
     editBtn.onClick = [this] { wave.showRaw = false; wave.repaint(); };
@@ -61,13 +66,14 @@ RiserEditor::RiserEditor (RiserProcessor& p)
     startTimerHz (30);
 }
 
-RiserEditor::~RiserEditor()
+RiserContent::~RiserContent()
 {
     stopTimer();
-    setLookAndFeel (nullptr);
+    if (popupPtr != nullptr)
+        popupPtr->removeComponentListener (this);
 }
 
-void RiserEditor::setBoolParam (const char* id, bool v)
+void RiserContent::setBoolParam (const char* id, bool v)
 {
     if (auto* p = proc.apvts.getParameter (id))
     {
@@ -77,7 +83,7 @@ void RiserEditor::setBoolParam (const char* id, bool v)
     }
 }
 
-void RiserEditor::refreshPresets (const juce::String& selectUser)
+void RiserContent::refreshPresets (const juce::String& selectUser)
 {
     presetBox.clear (juce::dontSendNotification);
     const int F = RiserProcessor::getNumFactoryPresets();
@@ -98,7 +104,7 @@ void RiserEditor::refreshPresets (const juce::String& selectUser)
     }
 }
 
-void RiserEditor::stepPreset (int delta)
+void RiserContent::stepPreset (int delta)
 {
     const int total = RiserProcessor::getNumFactoryPresets() + userNames.size();
     if (total <= 0) return;
@@ -108,13 +114,13 @@ void RiserEditor::stepPreset (int delta)
     presetBox.setSelectedId (next, juce::sendNotificationSync);
 }
 
-void RiserEditor::savePresetDialog()
+void RiserContent::savePresetDialog()
 {
     auto* aw = new juce::AlertWindow ("Save preset", "Preset name:", juce::MessageBoxIconType::NoIcon);
     aw->addTextEditor ("name", "My Preset");
     aw->addButton ("Save", 1, juce::KeyPress (juce::KeyPress::returnKey));
     aw->addButton ("Cancel", 0, juce::KeyPress (juce::KeyPress::escapeKey));
-    juce::Component::SafePointer<RiserEditor> safe (this);
+    juce::Component::SafePointer<RiserContent> safe (this);
     aw->enterModalState (true,
                          juce::ModalCallbackFunction::create ([safe, aw] (int result)
                          {
@@ -128,13 +134,13 @@ void RiserEditor::savePresetDialog()
                          true);
 }
 
-void RiserEditor::exportWav()
+void RiserContent::exportWav()
 {
     if (! proc.hasRiser()) return;
     chooser = std::make_unique<juce::FileChooser> ("Save riser as WAV",
                                                    juce::File::getSpecialLocation (juce::File::userDesktopDirectory).getChildFile ("Riser.wav"),
                                                    "*.wav");
-    juce::Component::SafePointer<RiserEditor> safe (this);
+    juce::Component::SafePointer<RiserContent> safe (this);
     chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles
                               | juce::FileBrowserComponent::warnAboutOverwriting,
                           [safe] (const juce::FileChooser& fc)
@@ -148,13 +154,89 @@ void RiserEditor::exportWav()
                           });
 }
 
-void RiserEditor::openFxPopup (int which, juce::Component& anchor)
+void RiserContent::showMenu()
 {
-    auto content = std::make_unique<FxPopup> (proc.apvts, which);
-    juce::CallOutBox::launchAsynchronously (std::move (content), getLocalArea (&anchor, anchor.getLocalBounds()), this);
+    juce::int64 bytes = 0;
+    const int count = proc.countRiserFiles (bytes);
+    juce::PopupMenu m;
+    m.addItem (1, "Open risers folder");
+    m.addItem (2, "Delete all created risers  (" + juce::String (count) + " files, "
+                      + juce::String ((double) bytes / 1048576.0, 1) + " MB) ...", count > 0);
+    m.addSeparator();
+    m.addItem (3, "Reset window size");
+    juce::Component::SafePointer<RiserContent> safe (this);
+    m.showMenuAsync (juce::PopupMenu::Options().withTargetComponent (&menuBtn),
+                     [safe] (int r)
+                     {
+                         if (safe == nullptr) return;
+                         if (r == 1)
+                         {
+                             auto d = safe->proc.getRiserFolder();
+                             d.createDirectory();
+                             d.startAsProcess();
+                         }
+                         else if (r == 2)
+                             safe->confirmDelete();
+                         else if (r == 3 && safe->onResetSize)
+                             safe->onResetSize();
+                     });
 }
 
-void RiserEditor::timerCallback()
+void RiserContent::confirmDelete()
+{
+    juce::int64 bytes = 0;
+    const int count = proc.countRiserFiles (bytes);
+    auto opts = juce::MessageBoxOptions::makeOptionsOkCancel (
+        juce::MessageBoxIconType::WarningIcon, "Delete all risers",
+        "This permanently deletes all " + juce::String (count) + " riser WAV file(s) that Riser Maker has created "
+        "(" + proc.getRiserFolder().getFullPathName() + ").\n\nProjects that use these files will lose them. Continue?",
+        "Delete", "Cancel", this);
+    juce::Component::SafePointer<RiserContent> safe (this);
+    juce::AlertWindow::showAsync (opts, [safe] (int r)
+    {
+        if (r != 1 || safe == nullptr) return;
+        const int deleted = safe->proc.deleteAllRisers();
+        juce::AlertWindow::showAsync (juce::MessageBoxOptions::makeOptionsOk (
+                                          juce::MessageBoxIconType::InfoIcon, "Done",
+                                          "Deleted " + juce::String (deleted) + " file(s).", "OK", safe.getComponent()),
+                                      [] (int) {});
+    });
+}
+
+void RiserContent::componentBeingDeleted (juce::Component& c)
+{
+    if (&c == popupPtr)
+    {
+        popupPtr = nullptr;
+        lastDismissedWhich = popupWhich;
+        lastDismissTime = juce::Time::getMillisecondCounter();
+    }
+}
+
+void RiserContent::openFxPopup (int which, FxButton& anchor, juce::uint32 downTime)
+{
+    // 1) popup still open -> a click on the name closes it
+    if (popupPtr != nullptr)
+    {
+        popupPtr->dismiss();
+        return;
+    }
+    // 2) this very click already closed it (the callout dismisses itself on mouse-down) -> do not reopen
+    if (which == lastDismissedWhich && (int) (downTime - lastDismissTime) < 150)
+        return;
+
+    if (! anchor.isOn())
+        anchor.setOn (true);
+
+    auto& box = juce::CallOutBox::launchAsynchronously (std::make_unique<FxPopup> (proc.apvts, which),
+                                                         popupParent.getLocalArea (&anchor, anchor.getLocalBounds()),
+                                                         &popupParent);
+    popupPtr = &box;
+    popupWhich = which;
+    box.addComponentListener (this);
+}
+
+void RiserContent::timerCallback()
 {
     const int v = proc.uiVersion.load();
     if (v != lastVer)
@@ -163,10 +245,14 @@ void RiserEditor::timerCallback()
         wave.repaint();
     }
     const bool vox = proc.getP ("vox") > 0.5f;
+    const bool manual = proc.isManualRec();
     voxBtn.setToggleState (vox, juce::dontSendNotification);
     instBtn.setToggleState (! vox, juce::dontSendNotification);
     listenBtn.setToggleState (proc.isListening(), juce::dontSendNotification);
     loopBtn.setToggleState (proc.getP ("loop") > 0.5f, juce::dontSendNotification);
+    autoBtn.setToggleState (proc.getP ("autoRec") > 0.5f, juce::dontSendNotification);
+    recBtn.setToggleState (manual, juce::dontSendNotification);
+    recBtn.setButtonText (manual ? "STOP" : "REC");
     rawBtn.setToggleState (wave.showRaw, juce::dontSendNotification);
     editBtn.setToggleState (! wave.showRaw, juce::dontSendNotification);
 
@@ -181,11 +267,11 @@ void RiserEditor::timerCallback()
     }
     for (auto* f : { &phoneBtn, &chorusBtn, &driveBtn, &tremBtn })
         f->repaint();
-    if (proc.isListening())
+    if (proc.isListening() || proc.getRecState() != 0)
         wave.repaint();
 }
 
-void RiserEditor::paint (juce::Graphics& g)
+void RiserContent::paint (juce::Graphics& g)
 {
     g.fillAll (ui::bg);
 
@@ -222,21 +308,24 @@ void RiserEditor::paint (juce::Graphics& g)
         }
 }
 
-void RiserEditor::resized()
+void RiserContent::resized()
 {
     presetBox.setBounds (150, 20, 230, 36);
     prevBtn.setBounds (380, 20, 34, 36);
     nextBtn.setBounds (414, 20, 34, 36);
     saveBtn.setBounds (462, 20, 56, 36);
+    menuBtn.setBounds (566, 20, 44, 36);
 
     voxBtn.setBounds (272, 92, 46, 24);
     instBtn.setBounds (322, 92, 46, 24);
     resetBtn.setBounds (510, 92, 90, 24);
 
     wave.setBounds (30, 120, 580, 120);
-    listenBtn.setBounds (42, 246, 90, 22);
-    loopBtn.setBounds (140, 246, 80, 22);
-    exportBtn.setBounds (270, 246, 110, 22);
+    listenBtn.setBounds (40, 246, 84, 22);
+    loopBtn.setBounds (128, 246, 60, 22);
+    recBtn.setBounds (194, 246, 60, 22);
+    autoBtn.setBounds (262, 246, 56, 22);
+    exportBtn.setBounds (340, 246, 108, 22);
     rawBtn.setBounds (480, 246, 50, 22);
     editBtn.setBounds (538, 246, 56, 22);
 
@@ -248,4 +337,30 @@ void RiserEditor::resized()
         FxButton* b = (i == 0) ? &phoneBtn : (i == 1) ? &chorusBtn : (i == 2) ? &driveBtn : &tremBtn;
         b->setBounds (70 + 125 * i, 680, 120, 28);
     }
+}
+
+//==============================================================================
+RiserEditor::RiserEditor (RiserProcessor& p)
+    : juce::AudioProcessorEditor (&p), proc (p),
+      content (p, *this, [this] { setSize (640, 740); })
+{
+    setLookAndFeel (&lnf);
+    addAndMakeVisible (content);
+    setResizable (true, true);
+    setResizeLimits (480, 555, 1120, 1295);
+    getConstrainer()->setFixedAspectRatio (640.0 / 740.0);
+    const int w = juce::jlimit (480, 1120, p.editorWidth);
+    setSize (w, (int) std::lround ((double) w * 740.0 / 640.0));
+}
+
+RiserEditor::~RiserEditor()
+{
+    setLookAndFeel (nullptr);
+}
+
+void RiserEditor::resized()
+{
+    content.setBounds (0, 0, 640, 740);
+    content.setTransform (juce::AffineTransform::scale ((float) getWidth() / 640.0f));
+    proc.editorWidth = getWidth();
 }

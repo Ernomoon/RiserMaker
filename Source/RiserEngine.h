@@ -63,23 +63,48 @@ struct Biquad
     }
 };
 
-// 4th-order Butterworth high/low-pass (24 dB/oct)
+// Butterworth high/low-pass, order 2 / 4 / 8  (12 / 24 / 48 dB per octave)
+inline const double* butterQ (int order, int& count)
+{
+    static const double q2[] = { 0.7071 };
+    static const double q4[] = { 0.5412, 1.3066 };
+    static const double q8[] = { 0.5098, 0.6013, 0.9000, 2.5629 };
+    if (order >= 8) { count = 4; return q8; }
+    if (order >= 4) { count = 2; return q4; }
+    count = 1;
+    return q2;
+}
+
 struct CutFilter
 {
-    Biquad s[2];
+    Biquad s[4];
+    int count = 2;
 
-    void setup (bool highpass, double sr, double freq)
+    void setup (bool highpass, double sr, double freq, int order = 4)
     {
-        s[0].c = BiquadCoefs::make (highpass, sr, freq, 0.5412);
-        s[1].c = BiquadCoefs::make (highpass, sr, freq, 1.3066);
+        const double* q = butterQ (order, count);
+        for (int i = 0; i < count; ++i)
+        {
+            s[i].c = BiquadCoefs::make (highpass, sr, freq, q[i]);
+            s[i].z1 = s[i].z2 = 0.0;
+        }
     }
-    float process (float x) { return s[1].process (s[0].process (x)); }
+    float process (float x)
+    {
+        for (int i = 0; i < count; ++i)
+            x = s[i].process (x);
+        return x;
+    }
 };
 
-inline double cutMagnitude (bool highpass, double freq, double cutFreq, double sr)
+inline double cutMagnitude (bool highpass, double freq, double cutFreq, double sr, int order = 4)
 {
-    return BiquadCoefs::make (highpass, sr, cutFreq, 0.5412).magnitude (freq, sr)
-         * BiquadCoefs::make (highpass, sr, cutFreq, 1.3066).magnitude (freq, sr);
+    int count = 0;
+    const double* q = butterQ (order, count);
+    double m = 1.0;
+    for (int i = 0; i < count; ++i)
+        m *= BiquadCoefs::make (highpass, sr, cutFreq, q[i]).magnitude (freq, sr);
+    return m;
 }
 
 // ---------- engine ----------
@@ -87,16 +112,26 @@ struct FxParams
 {
     bool phone = false, chorus = false, drive = false, trem = false;
     float phoneMix = 1.0f;
-    float chorusMix = 0.5f, chorusRate = 0.8f;
+    float chorusMix = 0.6f, chorusRate = 1.0f, chorusDepth = 0.6f;
     float driveAmt = 0.7f, driveMix = 0.5f;
     float tremRate = 5.0f, tremMix = 1.0f;
     float lowCut = 20.0f, highCut = 20000.0f;
+    int cutOrder = 8;
 };
 
 juce::AudioBuffer<float> resampleBuffer (const juce::AudioBuffer<float>& in, double fromSr, double toSr);
 
-// Builds the raw "reverse reverb" swell (length = lengthSec, ends exactly on the vocal onset).
-juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, double sr, double lengthSec, bool vox);
+// Which part of the captured audio is used to excite the reverb.
+struct Excerpt { int start = 0; int length = 0; };
+
+// Removes leading silence / noise so the phrase starts at sample 0.
+void trimLeading (juce::AudioBuffer<float>& buf, double sr);
+
+// Smart element picking: skips breaths, noise and a leading "sss"; for instrumentals locks on the first strong hit.
+Excerpt chooseExcerpt (const juce::AudioBuffer<float>& src, double sr, double lengthSec, bool vox);
+
+// Builds the raw "reverse reverb" swell (length = lengthSec, ends exactly where the chosen element starts).
+juce::AudioBuffer<float> buildBase (const juce::AudioBuffer<float>& source, double sr, double lengthSec, bool vox, const Excerpt& ex);
 
 // Applies the effect chain + cut filters + final fades/normalisation (in place).
 void applyFx (juce::AudioBuffer<float>& buf, double sr, const FxParams& p);

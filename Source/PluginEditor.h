@@ -90,7 +90,7 @@ public:
 class LabelButton : public juce::Button
 {
 public:
-    enum Icon { None, Play, Loop, Reset };
+    enum Icon { None, Play, Loop, Reset, Rec };
 
     LabelButton (const juce::String& text, Icon ic = None, juce::Colour lit = ui::purple)
         : juce::Button (text), icon (ic), litColour (lit) {}
@@ -121,6 +121,11 @@ public:
             g.strokePath (p, juce::PathStrokeType (1.4f));
             tx = 18.0f;
         }
+        else if (icon == Rec)
+        {
+            g.fillEllipse (1.0f, cy - 5.0f, 10.0f, 10.0f);
+            tx = 16.0f;
+        }
         g.setFont (ui::font (12.5f, true).withExtraKerningFactor (0.15f));
         g.drawText (getButtonText(), juce::Rectangle<float> (tx, 0.0f, (float) getWidth() - tx, (float) getHeight()),
                     icon == None ? juce::Justification::centred : juce::Justification::centredLeft, false);
@@ -129,6 +134,24 @@ public:
 private:
     Icon icon;
     juce::Colour litColour;
+};
+
+class MenuButton : public juce::Button
+{
+public:
+    MenuButton() : juce::Button ("menu") {}
+    void paintButton (juce::Graphics& g, bool over, bool) override
+    {
+        auto b = getLocalBounds().toFloat().reduced (1.0f);
+        g.setColour (ui::panelDark);
+        g.fillRoundedRectangle (b, 8.0f);
+        g.setColour (over ? juce::Colour (0xff5a5a62) : juce::Colour (0xff3a3a40));
+        g.drawRoundedRectangle (b, 8.0f, 1.0f);
+        g.setColour (over ? ui::light : ui::dim);
+        const float cx = b.getCentreX(), cy = b.getCentreY();
+        for (int i = -1; i <= 1; ++i)
+            g.drawLine (cx - 8.0f, cy + (float) i * 5.0f, cx + 8.0f, cy + (float) i * 5.0f, 1.8f);
+    }
 };
 
 //==============================================================================
@@ -142,12 +165,24 @@ public:
     {
         auto b = getLocalBounds().toFloat();
         const auto& peaks = showRaw ? proc.sourcePeaks : proc.riserPeaks;
+        const int rec = proc.getRecState();
+        const juce::String recText = (rec == 2 ? "RECORDING   " : "CAPTURING   ") + juce::String (proc.getRecSeconds(), 1) + " s"
+                                     + (rec == 2 ? "   -   press STOP to finish" : "");
         if (peaks.empty())
         {
-            g.setColour (ui::dim.withAlpha (0.8f));
             g.setFont (ui::font (13.0f, true).withExtraKerningFactor (0.12f));
-            g.drawText (fileHover ? "DROP AUDIO FILE" : "PLAY AUDIO THROUGH THE PLUGIN  /  DROP A FILE",
-                        b, juce::Justification::centred, false);
+            if (rec != 0)
+            {
+                g.setColour (juce::Colour (0xffe05555));
+                g.fillEllipse (b.getCentreX() - 130.0f, b.getCentreY() - 4.0f, 8.0f, 8.0f);
+                g.drawText (recText, b.withTrimmedLeft (16.0f), juce::Justification::centred, false);
+            }
+            else
+            {
+                g.setColour (ui::dim.withAlpha (0.8f));
+                g.drawText (fileHover ? "DROP AUDIO FILE" : "PRESS REC OR PLAY AUDIO THROUGH THE PLUGIN  /  DROP A FILE",
+                            b, juce::Justification::centred, false);
+            }
             return;
         }
         auto area = b.reduced (26.0f, 0.0f);
@@ -167,6 +202,28 @@ public:
             const float x = area.getX() + ((float) i + 0.5f) * step;
             g.setColour (ui::purple.withAlpha (0.35f + 0.65f * pk));
             g.fillRoundedRectangle (x - 1.0f, cy - h, 2.0f, 2.0f * h, 1.0f);
+        }
+
+        if (showRaw && proc.selEnd > proc.selStart)
+        {
+            const float x0 = area.getX() + proc.selStart * area.getWidth();
+            const float x1 = area.getX() + proc.selEnd * area.getWidth();
+            g.setColour (ui::purple.withAlpha (0.16f));
+            g.fillRect (juce::Rectangle<float> (x0, b.getY() + 4.0f, juce::jmax (2.0f, x1 - x0), b.getHeight() - 8.0f));
+            g.setColour (ui::purple);
+            g.drawLine (x0, b.getY() + 4.0f, x0, b.getBottom() - 4.0f, 1.5f);
+            g.drawLine (x1, b.getY() + 4.0f, x1, b.getBottom() - 4.0f, 1.5f);
+            g.setFont (ui::font (10.5f, true).withExtraKerningFactor (0.1f));
+            g.setColour (juce::Colour (0xffcfc6ff));
+            g.drawText ("USED FOR RISER", juce::Rectangle<float> (x0 + 4.0f, b.getY() + 4.0f, 120.0f, 14.0f), juce::Justification::centredLeft, false);
+        }
+
+        if (rec != 0)
+        {
+            g.setColour (juce::Colour (0xffe05555));
+            g.fillEllipse (b.getX() + 10.0f, b.getY() + 8.0f, 8.0f, 8.0f);
+            g.setFont (ui::font (11.0f, true));
+            g.drawText (recText, juce::Rectangle<float> (b.getX() + 24.0f, b.getY() + 4.0f, 260.0f, 16.0f), juce::Justification::centredLeft, false);
         }
 
         if (showRaw && proc.getP ("vox") > 0.5f)
@@ -196,7 +253,7 @@ public:
             g.drawLine (x, b.getY() + 6.0f, x, b.getBottom() - 6.0f, 1.2f);
         }
 
-        if (! showRaw && hover && ! dragging)
+        if (! showRaw && hover && ! dragging && rec == 0)
         {
             auto r = area.reduced (10.0f, 14.0f);
             g.setColour (juce::Colour (0xaa0f0f11));
@@ -260,20 +317,20 @@ public:
     {
         lowP = a.getParameter ("lowCut");
         highP = a.getParameter ("highCut");
+        slopeP = a.getParameter ("cutSlope");
         startTimerHz (30);
     }
 
+    void resized() override { updatePlot(); }
+
     void paint (juce::Graphics& g) override
     {
+        updatePlot();
         auto full = getLocalBounds().toFloat();
         g.setColour (ui::panelDark);
         g.fillRoundedRectangle (full, 10.0f);
         g.setColour (juce::Colour (0xff26262a));
         g.drawRoundedRectangle (full.reduced (0.5f), 10.0f, 1.0f);
-
-        plot = full.reduced (16.0f, 10.0f);
-        auto head = plot.removeFromTop (16.0f);
-        plot.removeFromTop (4.0f);
 
         const double lowF = lowHz(), highF = highHz();
         g.setFont (ui::font (11.0f, true).withExtraKerningFactor (0.1f));
@@ -281,6 +338,8 @@ public:
         g.drawText ("LOW CUT  " + fmtHz (lowF, lowF > 25.0), head, juce::Justification::centredLeft, false);
         g.setColour (highF < 19000.0 ? ui::amber : ui::dim);
         g.drawText ("HIGH CUT  " + fmtHz (highF, highF < 19000.0), head, juce::Justification::centredRight, false);
+        g.setColour (slopeHover ? ui::light : ui::dim);
+        g.drawText ("SLOPE  " + juce::String (slopeDb()) + " dB/oct", slopeRect, juce::Justification::centred, false);
 
         // grid
         g.setFont (ui::font (9.5f));
@@ -296,10 +355,10 @@ public:
         g.setColour (juce::Colour (0xff2e2e33));
         g.drawLine (plot.getX(), dbToY (0.0), plot.getRight(), dbToY (0.0), 1.0f);
 
-        // response curve
+        // response curve (the real filter response, same maths as the audio)
         juce::Path curve;
         const int w = (int) plot.getWidth();
-        for (int px = 0; px <= w; px += 2)
+        for (int px = 0; px <= w; ++px)
         {
             const float x = plot.getX() + (float) px;
             const float y = dbToY (respDb (xToFreq (x)));
@@ -329,17 +388,44 @@ public:
         }
     }
 
+    void mouseMove (const juce::MouseEvent& e) override
+    {
+        const bool h = slopeRect.contains (e.position);
+        if (h != slopeHover) { slopeHover = h; repaint(); }
+    }
+    void mouseExit (const juce::MouseEvent&) override
+    {
+        if (slopeHover) { slopeHover = false; repaint(); }
+    }
+
     void mouseDown (const juce::MouseEvent& e) override
     {
-        dragLow = std::abs (e.position.x - freqToX (lowHz())) < std::abs (e.position.x - freqToX (highHz()));
-        if (auto* p = dragLow ? lowP : highP)
-            p->beginChangeGesture();
-        mouseDrag (e);
+        dragActive = false;
+        if (slopeRect.contains (e.position))
+        {
+            if (slopeP != nullptr)
+            {
+                const int next = (slopeIndex() + 1) % 3;
+                slopeP->beginChangeGesture();
+                slopeP->setValueNotifyingHost (slopeP->convertTo0to1 ((float) next));
+                slopeP->endChangeGesture();
+            }
+            return;
+        }
+        const float dl = std::abs (e.position.x - freqToX (lowHz()));
+        const float dh = std::abs (e.position.x - freqToX (highHz()));
+        dragLow = dl < dh;
+        if (juce::jmin (dl, dh) > 26.0f)
+            return; // clicked on empty space: do not move anything
+        auto* p = dragLow ? lowP : highP;
+        if (p == nullptr) return;
+        dragActive = true;
+        p->beginChangeGesture();
     }
     void mouseDrag (const juce::MouseEvent& e) override
     {
+        if (! dragActive) return;
         auto* p = dragLow ? lowP : highP;
-        if (p == nullptr) return;
         const auto& r = p->getNormalisableRange();
         const float f = juce::jlimit (r.start, r.end, (float) xToFreq (e.position.x));
         p->setValueNotifyingHost (p->convertTo0to1 (f));
@@ -347,13 +433,17 @@ public:
     }
     void mouseUp (const juce::MouseEvent&) override
     {
+        if (! dragActive) return;
         if (auto* p = dragLow ? lowP : highP)
             p->endChangeGesture();
+        dragActive = false;
     }
     void mouseDoubleClick (const juce::MouseEvent& e) override
     {
-        const bool low = std::abs (e.position.x - freqToX (lowHz())) < std::abs (e.position.x - freqToX (highHz()));
-        if (auto* p = low ? lowP : highP)
+        const float dl = std::abs (e.position.x - freqToX (lowHz()));
+        const float dh = std::abs (e.position.x - freqToX (highHz()));
+        if (juce::jmin (dl, dh) > 40.0f) return;
+        if (auto* p = (dl < dh) ? lowP : highP)
         {
             p->beginChangeGesture();
             p->setValueNotifyingHost (p->getDefaultValue());
@@ -365,10 +455,22 @@ private:
     void timerCallback() override
     {
         const double l = lowHz(), h = highHz();
-        if (l != lastL || h != lastH) { lastL = l; lastH = h; repaint(); }
+        const int sl = slopeIndex();
+        if (l != lastL || h != lastH || sl != lastSlope) { lastL = l; lastH = h; lastSlope = sl; repaint(); }
+    }
+    void updatePlot()
+    {
+        auto full = getLocalBounds().toFloat();
+        plot = full.reduced (16.0f, 10.0f);
+        head = plot.removeFromTop (16.0f);
+        plot.removeFromTop (4.0f);
+        slopeRect = juce::Rectangle<float> (head.getCentreX() - 70.0f, head.getY(), 140.0f, head.getHeight());
     }
     double lowHz() const { return (double) apvts.getRawParameterValue ("lowCut")->load(); }
     double highHz() const { return (double) apvts.getRawParameterValue ("highCut")->load(); }
+    int slopeIndex() const { return juce::jlimit (0, 2, (int) std::lround (apvts.getRawParameterValue ("cutSlope")->load())); }
+    int slopeDb() const { static const int v[3] = { 12, 24, 48 }; return v[slopeIndex()]; }
+    int slopeOrder() const { static const int v[3] = { 2, 4, 8 }; return v[slopeIndex()]; }
     static juce::String fmtHz (double f, bool active)
     {
         if (! active) return "OFF";
@@ -384,24 +486,27 @@ private:
     }
     float dbToY (double db) const
     {
-        const double lo = -36.0, hi = 6.0;
+        const double lo = -48.0, hi = 6.0;
         return plot.getBottom() - (float) ((juce::jlimit (lo, hi, db) - lo) / (hi - lo)) * plot.getHeight();
     }
     double respDb (double f) const
     {
         double m = 1.0;
         const double lo = lowHz(), hi = highHz();
-        if (lo > 25.0)    m *= riser::cutMagnitude (true, f, lo, 48000.0);
-        if (hi < 19000.0) m *= riser::cutMagnitude (false, f, hi, 48000.0);
+        const int order = slopeOrder();
+        if (lo > 25.0)    m *= riser::cutMagnitude (true, f, lo, 48000.0, order);
+        if (hi < 19000.0) m *= riser::cutMagnitude (false, f, hi, 48000.0, order);
         return 20.0 * std::log10 (juce::jmax (m, 1.0e-6));
     }
 
     juce::AudioProcessorValueTreeState& apvts;
     juce::RangedAudioParameter* lowP = nullptr;
     juce::RangedAudioParameter* highP = nullptr;
-    juce::Rectangle<float> plot;
-    bool dragLow = true;
+    juce::RangedAudioParameter* slopeP = nullptr;
+    juce::Rectangle<float> plot, head, slopeRect;
+    bool dragLow = true, dragActive = false, slopeHover = false;
     double lastL = -1.0, lastH = -1.0;
+    int lastSlope = -1;
 };
 
 //==============================================================================
@@ -449,7 +554,7 @@ public:
         switch (which)
         {
             case 0: add ("phoneMix", "MIX", true); break;
-            case 1: add ("chorusRate", "RATE", false); add ("chorusMix", "MIX", true); break;
+            case 1: add ("chorusRate", "RATE", false); add ("chorusDepth", "DEPTH", true); add ("chorusMix", "MIX", true); break;
             case 2: add ("driveAmt", "DRIVE", true); add ("driveMix", "MIX", true); break;
             default: add ("tremRate", "RATE", false); add ("tremMix", "MIX", true); break;
         }
@@ -472,7 +577,7 @@ private:
 class FxButton : public juce::Component
 {
 public:
-    FxButton (juce::RangedAudioParameter* p, const juce::String& n, std::function<void()> onName)
+    FxButton (juce::RangedAudioParameter* p, const juce::String& n, std::function<void (juce::uint32)> onName)
         : par (p), name (n), openPopup (std::move (onName))
     {
         setMouseCursor (juce::MouseCursor::PointingHandCursor);
@@ -506,55 +611,62 @@ public:
         g.drawText (name, juce::Rectangle<float> (b.getX() + 28.0f, b.getY(), b.getWidth() - 28.0f, b.getHeight()),
                     juce::Justification::centredLeft, false);
     }
+    void mouseDown (const juce::MouseEvent&) override { downTime = juce::Time::getMillisecondCounter(); }
     void mouseUp (const juce::MouseEvent& e) override
     {
         if (! getLocalBounds().contains (e.getPosition())) return;
         if (e.x < 28)
             setOn (! isOn());
-        else
-        {
-            if (! isOn()) setOn (true);
-            if (openPopup) openPopup();
-        }
+        else if (openPopup)
+            openPopup (downTime);
         repaint();
     }
 
 private:
     juce::RangedAudioParameter* par;
     juce::String name;
-    std::function<void()> openPopup;
+    std::function<void (juce::uint32)> openPopup;
+    juce::uint32 downTime = 0;
 };
 
 //==============================================================================
-class RiserEditor : public juce::AudioProcessorEditor, private juce::Timer
+// All the UI lives here, laid out for a fixed 640x740 design; the editor scales it.
+class RiserContent : public juce::Component, private juce::Timer, private juce::ComponentListener
 {
 public:
-    explicit RiserEditor (RiserProcessor&);
-    ~RiserEditor() override;
+    RiserContent (RiserProcessor&, juce::Component& popupParent, std::function<void()> resetSize);
+    ~RiserContent() override;
 
     void paint (juce::Graphics&) override;
     void resized() override;
 
 private:
     void timerCallback() override;
+    void componentBeingDeleted (juce::Component& c) override;
     void refreshPresets (const juce::String& selectUser = {});
     void stepPreset (int delta);
     void savePresetDialog();
     void exportWav();
-    void openFxPopup (int which, juce::Component& anchor);
+    void openFxPopup (int which, FxButton& anchor, juce::uint32 downTime);
+    void showMenu();
+    void confirmDelete();
     void setBoolParam (const char* id, bool v);
 
     RiserProcessor& proc;
-    RiserLNF lnf;
+    juce::Component& popupParent;
+    std::function<void()> onResetSize;
 
     juce::ComboBox presetBox;
     juce::TextButton prevBtn { "<" }, nextBtn { ">" }, saveBtn { "SAVE" };
+    MenuButton menuBtn;
     juce::StringArray userNames;
 
     LabelButton voxBtn { "VOX" }, instBtn { "INST", LabelButton::None, ui::light };
     LabelButton resetBtn { "RESET", LabelButton::Reset, ui::light };
     LabelButton listenBtn { "LISTEN", LabelButton::Play, ui::purple };
     LabelButton loopBtn { "LOOP", LabelButton::Loop, ui::purple };
+    LabelButton recBtn { "REC", LabelButton::Rec, juce::Colour (0xffe05555) };
+    LabelButton autoBtn { "AUTO", LabelButton::None, ui::purple };
     LabelButton exportBtn { "EXPORT WAV", LabelButton::None, ui::light };
     LabelButton rawBtn { "RAW", LabelButton::None, ui::purple };
     LabelButton editBtn { "EDIT", LabelButton::None, ui::purple };
@@ -565,9 +677,30 @@ private:
     juce::AudioProcessorValueTreeState::SliderAttachment knobAtt;
     FxButton phoneBtn, chorusBtn, driveBtn, tremBtn;
 
+    // popup bookkeeping (second click on the same effect closes it)
+    juce::CallOutBox* popupPtr = nullptr;
+    int popupWhich = -1, lastDismissedWhich = -1;
+    juce::uint32 lastDismissTime = 0;
+
     std::unique_ptr<juce::FileChooser> chooser;
     juce::String lengthText = "4 BARS";
     int lastVer = -1;
+
+    JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RiserContent)
+};
+
+//==============================================================================
+class RiserEditor : public juce::AudioProcessorEditor
+{
+public:
+    explicit RiserEditor (RiserProcessor&);
+    ~RiserEditor() override;
+    void resized() override;
+
+private:
+    RiserProcessor& proc;
+    RiserLNF lnf;
+    RiserContent content;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (RiserEditor)
 };

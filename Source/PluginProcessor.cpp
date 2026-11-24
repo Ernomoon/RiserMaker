@@ -3,8 +3,10 @@
 
 namespace
 {
-const char* const kRenderIds[15] = { "length", "vox", "lowCut", "highCut", "phone", "chorus", "drive", "tremolo",
-                                     "phoneMix", "chorusMix", "chorusRate", "driveAmt", "driveMix", "tremRate", "tremMix" };
+const char* const kRenderIds[17] = { "length", "vox", "lowCut", "highCut", "phone", "chorus", "drive", "tremolo",
+                                     "phoneMix", "chorusMix", "chorusRate", "driveAmt", "driveMix", "tremRate", "tremMix",
+                                     "chorusDepth", "cutSlope" };
+const int kCutOrders[3] = { 2, 4, 8 };
 const double kLenMult[6] = { 0.25, 0.5, 1.0, 2.0, 4.0, 8.0 };
 const char* const kLenName[6] = { "quarter", "half", "1", "2", "4", "8" };
 
@@ -39,6 +41,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiserProcessor::createLayout
                                                    StringArray { "1/4 Bar", "1/2 Bar", "1 Bar", "2 Bars", "4 Bars", "8 Bars" }, 4));
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "vox", 1 }, "Vox Mode", true));
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "loop", 1 }, "Loop", false));
+    l.add (std::make_unique<AudioParameterBool> (ParameterID { "autoRec", 1 }, "Auto Capture", true));
+    l.add (std::make_unique<AudioParameterChoice> (ParameterID { "cutSlope", 1 }, "Cut Slope",
+                                                   StringArray { "12 dB/oct", "24 dB/oct", "48 dB/oct" }, 2));
 
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "lowCut", 1 }, "Low Cut",
                                                   NormalisableRange<float> (20.0f, 5000.0f, 0.0f, 0.3f), 20.0f));
@@ -51,8 +56,9 @@ juce::AudioProcessorValueTreeState::ParameterLayout RiserProcessor::createLayout
     l.add (std::make_unique<AudioParameterBool> (ParameterID { "tremolo", 1 }, "Tremolo", false));
 
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "phoneMix", 1 }, "Phone Mix", NormalisableRange<float> (0.0f, 1.0f), 1.0f));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "chorusMix", 1 }, "Chorus Mix", NormalisableRange<float> (0.0f, 1.0f), 0.5f));
-    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "chorusRate", 1 }, "Chorus Rate", NormalisableRange<float> (0.1f, 5.0f, 0.0f, 0.5f), 0.8f));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "chorusMix", 1 }, "Chorus Mix", NormalisableRange<float> (0.0f, 1.0f), 0.6f));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "chorusDepth", 1 }, "Chorus Depth", NormalisableRange<float> (0.0f, 1.0f), 0.6f));
+    l.add (std::make_unique<AudioParameterFloat> (ParameterID { "chorusRate", 1 }, "Chorus Rate", NormalisableRange<float> (0.1f, 6.0f, 0.0f, 0.5f), 1.0f));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "driveAmt", 1 }, "Drive Amount", NormalisableRange<float> (0.0f, 1.0f), 0.7f));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "driveMix", 1 }, "Drive Mix", NormalisableRange<float> (0.0f, 1.0f), 0.5f));
     l.add (std::make_unique<AudioParameterFloat> (ParameterID { "tremRate", 1 }, "Tremolo Rate", NormalisableRange<float> (0.5f, 20.0f, 0.0f, 0.5f), 5.0f));
@@ -137,41 +143,75 @@ void RiserProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiB
     for (int ch = 0; ch < numCh; ++ch)
         peak = juce::jmax (peak, buffer.getMagnitude (ch, 0, n));
 
-    auto& cb = capBuf[capActive];
-    const int capSize = cb.getNumSamples();
+    const double sr = hostSR.load();
+    const int capSize = capBuf[0].getNumSamples();
+    const bool manual = manualRec.load();
+    auto finish = [&] (int len)
+    {
+        if (len > (int) (0.2 * sr))
+        {
+            handoffIndex = capActive;
+            handoffLength = len;
+            handoffReady = true;
+            capActive ^= 1;
+        }
+        capRecording = false;
+        capManualActive = false;
+        capWritePos = 0;
+        capSilence = 0;
+    };
+
     if (capSize > 0)
     {
         const float thr = 0.004f; // about -48 dBFS
-        if (! capRecording && peak > thr)
+
+        // REC button edges
+        if (manual && ! prevManual)
         {
             capRecording = true;
+            capManualActive = true;
             capWritePos = 0;
             capSilence = 0;
         }
+        else if (! manual && prevManual && capRecording && capManualActive)
+            finish (capWritePos);
+        prevManual = manual;
+
+        if (! capRecording && ! manual && getP ("autoRec") > 0.5f && peak > thr)
+        {
+            capRecording = true;
+            capManualActive = false;
+            capWritePos = 0;
+            capSilence = 0;
+        }
+
         if (capRecording)
         {
+            auto& cb = capBuf[capActive];
             const int w = juce::jmin (n, capSize - capWritePos);
             for (int ch = 0; ch < 2; ++ch)
                 cb.copyFrom (ch, capWritePos, buffer, juce::jmin (ch, numCh - 1), 0, w);
             capWritePos += w;
-            capSilence = (peak < thr) ? capSilence + n : 0;
 
-            const double sr = hostSR.load();
-            const bool stoppedNow = wasPlaying && ! playing;
-            if (capSilence > (int) (0.6 * sr) || stoppedNow || capWritePos >= capSize)
+            if (capManualActive)
             {
-                const int len = juce::jmin (capWritePos, juce::jmax (0, capWritePos - capSilence) + (int) (0.05 * sr));
-                if (len > (int) (0.2 * sr))
+                if (capWritePos >= capSize) // buffer full: stop by itself
                 {
-                    handoffIndex = capActive;
-                    handoffLength = len;
-                    handoffReady = true;
-                    capActive ^= 1;
+                    manualRec = false;
+                    prevManual = false;
+                    finish (capWritePos);
                 }
-                capRecording = false;
-                capWritePos = capSilence = 0;
+            }
+            else
+            {
+                capSilence = (peak < thr) ? capSilence + n : 0;
+                const bool stoppedNow = wasPlaying && ! playing;
+                if (capSilence > (int) (0.6 * sr) || stoppedNow || capWritePos >= capSize)
+                    finish (juce::jmin (capWritePos, juce::jmax (0, capWritePos - capSilence) + (int) (0.05 * sr)));
             }
         }
+        recState = capRecording ? (capManualActive ? 2 : 1) : 0;
+        recSamples = capWritePos;
     }
     wasPlaying = playing;
 
@@ -231,12 +271,14 @@ riser::FxParams RiserProcessor::readFx() const
     p.phoneMix = getP ("phoneMix");
     p.chorusMix = getP ("chorusMix");
     p.chorusRate = getP ("chorusRate");
+    p.chorusDepth = getP ("chorusDepth");
     p.driveAmt = getP ("driveAmt");
     p.driveMix = getP ("driveMix");
     p.tremRate = getP ("tremRate");
     p.tremMix = getP ("tremMix");
     p.lowCut = getP ("lowCut");
     p.highCut = getP ("highCut");
+    p.cutOrder = kCutOrders[juce::jlimit (0, 2, (int) std::lround (getP ("cutSlope")))];
     return p;
 }
 
@@ -252,6 +294,7 @@ void RiserProcessor::timerCallback()
             for (int ch = 0; ch < 2; ++ch)
                 source.copyFrom (ch, 0, capBuf[idx], ch, 0, len);
             sourceSR = hostSR.load();
+            riser::trimLeading (source, sourceSR);
             ++sourceVersion;
             analyseSource();
             renderDirty = true;
@@ -305,7 +348,11 @@ void RiserProcessor::rebuild()
     if (base.getNumSamples() == 0 || std::abs (baseLen - lengthSec) > 1.0e-6 || baseVox != vox
         || baseSrcVersion != sourceVersion || std::abs (baseSR - sr) > 0.5)
     {
-        base = riser::buildBase (source, sr, lengthSec, vox);
+        excerpt = riser::chooseExcerpt (source, sr, lengthSec, vox);
+        const float srcLen = (float) juce::jmax (1, source.getNumSamples());
+        selStart = (float) excerpt.start / srcLen;
+        selEnd = (float) (excerpt.start + excerpt.length) / srcLen;
+        base = riser::buildBase (source, sr, lengthSec, vox, excerpt);
         baseLen = lengthSec;
         baseVox = vox;
         baseSrcVersion = sourceVersion;
@@ -322,6 +369,7 @@ void RiserProcessor::rebuild()
         const juce::ScopedLock sl (riserLock);
         riser.makeCopyOf (out);
         riserLen = riser.getNumSamples();
+        ++riserRevision;
     }
     riserPeaks = riser::computePeaks (out, 160);
     ++uiVersion;
@@ -341,6 +389,7 @@ void RiserProcessor::clearSource()
     sourcePeaks.clear();
     riserPeaks.clear();
     sibilance.clear();
+    selStart = selEnd = 0.0f;
     ++uiVersion;
 }
 
@@ -365,18 +414,60 @@ void RiserProcessor::loadSourceFromFile (const juce::File& f)
     renderDirty = true;
 }
 
+juce::File RiserProcessor::getRiserFolder() const
+{
+    return juce::File::getSpecialLocation (juce::File::userDocumentsDirectory)
+        .getChildFile ("RiserMaker").getChildFile ("Risers");
+}
+
+int RiserProcessor::countRiserFiles (juce::int64& bytes) const
+{
+    bytes = 0;
+    int count = 0;
+    auto dir = getRiserFolder();
+    if (dir.isDirectory())
+        for (auto& f : dir.findChildFiles (juce::File::findFiles, false, "*.wav"))
+        {
+            ++count;
+            bytes += f.getSize();
+        }
+    return count;
+}
+
+int RiserProcessor::deleteAllRisers()
+{
+    int deleted = 0;
+    auto wipe = [&] (const juce::File& dir)
+    {
+        if (dir.isDirectory())
+            for (auto& f : dir.findChildFiles (juce::File::findFiles, false, "*.wav"))
+                if (f.deleteFile())
+                    ++deleted;
+    };
+    wipe (getRiserFolder());
+    wipe (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("RiserMaker")); // old location
+    exportedRevision = -1;
+    exportedFile = juce::File();
+    return deleted;
+}
+
 juce::File RiserProcessor::exportRiserToFile()
 {
+    if (exportedRevision == riserRevision && exportedFile.existsAsFile())
+        return exportedFile; // nothing changed since the last export: reuse the same file
+
     juce::AudioBuffer<float> copy;
+    int rev = 0;
     {
         const juce::ScopedLock sl (riserLock);
         copy.makeCopyOf (riser);
+        rev = riserRevision;
     }
     if (copy.getNumSamples() == 0)
         return {};
 
     const int idx = juce::jlimit (0, 5, (int) std::lround (getP ("length")));
-    auto dir = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("RiserMaker");
+    auto dir = getRiserFolder();
     dir.createDirectory();
     auto name = "Riser_" + juce::String (kLenName[idx]) + "bar_" + juce::String (juce::roundToInt (hostBpm.load())) + "bpm";
     auto file = dir.getNonexistentChildFile (name, ".wav", false);
@@ -391,6 +482,8 @@ juce::File RiserProcessor::exportRiserToFile()
     os.release(); // the writer owns the stream now
     w->writeFromAudioSampleBuffer (copy, 0, copy.getNumSamples());
     w.reset();
+    exportedFile = file;
+    exportedRevision = rev;
     return file;
 }
 
@@ -464,6 +557,7 @@ bool RiserProcessor::loadUserPreset (const juce::String& name)
 
 void RiserProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
+    apvts.state.setProperty ("uiW", editorWidth, nullptr);
     auto state = apvts.copyState();
     std::unique_ptr<juce::XmlElement> xml (state.createXml());
     if (xml != nullptr)
@@ -474,7 +568,10 @@ void RiserProcessor::setStateInformation (const void* data, int sizeInBytes)
 {
     std::unique_ptr<juce::XmlElement> xml (getXmlFromBinary (data, sizeInBytes));
     if (xml != nullptr && xml->hasTagName (apvts.state.getType()))
+    {
         apvts.replaceState (juce::ValueTree::fromXml (*xml));
+        editorWidth = juce::jlimit (480, 1120, (int) apvts.state.getProperty ("uiW", 640));
+    }
 }
 
 juce::AudioProcessorEditor* RiserProcessor::createEditor()
