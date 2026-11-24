@@ -14,7 +14,7 @@ jobs:
         run: cmake -B build -A x64
 
       - name: Build VST3
-        run: cmake --build build --config Release --target RiserMaker_VST3 --parallel
+        run: cmake --build build --config Release --target MoonRiser_VST3 --parallel
 
       - name: Show result
         shell: pwsh
@@ -25,16 +25,9 @@ jobs:
         run: |
           $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
           if (!(Test-Path $iscc)) { choco install innosetup -y --no-progress }
-          & $iscc "installer\RiserMaker.iss"
-
-      - name: Zip plugin folder
-        shell: pwsh
-        run: |
-          Compress-Archive -Path "build\RiserMaker_artefacts\Release\VST3\Riser Maker.vst3" -DestinationPath "RiserMaker-VST3-manual.zip"
+          & $iscc "installer\MoonRiser.iss"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: RiserMaker-Windows
-          path: |
-            installer/Output/RiserMaker-Setup.exe
-            RiserMaker-VST3-manual.zip
+          name: MoonRiser-Windows
+          path: installer/Output/MoonRiser-Setup.exe
